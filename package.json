@@ -1,0 +1,25 @@
+{
+  "name": "ai-digest-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Claude Agent SDK agent that researches AI news and sends a voice digest to Telegram",
+  "type": "module",
+  "scripts": {
+    "digest": "tsx src/index.ts",
+    "test:telegram": "tsx src/telegram.ts",
+    "test:tts": "tsx src/tools.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.202",
+    "edge-tts-universal": "^1.4.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "tsx": "^4.23.0",
+    "typescript": "^6.0.3"
+  }
+}
