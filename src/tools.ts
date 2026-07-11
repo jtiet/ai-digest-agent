@@ -6,6 +6,7 @@ import { EdgeTTS } from "edge-tts-universal";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { recordCovered } from "./memory.js";
 import { withRetry } from "./retry.js";
 import { sendAudio } from "./telegram.js";
 
@@ -65,11 +66,35 @@ const sendTelegramVoice = tool(
   },
 );
 
+const recordCoveredTool = tool(
+  "record_covered",
+  "Save today's covered story headlines into the rolling dedup memory. " +
+    "Call this exactly once, after the digest is delivered, with one short headline per story you covered.",
+  {
+    headlines: z
+      .array(z.string().min(1))
+      .min(1)
+      .describe("One short headline per story in today's digest."),
+  },
+  async ({ headlines }) => {
+    const map = recordCovered(headlines);
+    const total = Object.values(map).reduce((n, list) => n + list.length, 0);
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Memory updated: ${headlines.length} headlines recorded for today (${total} on record across ${Object.keys(map).length} days).`,
+        },
+      ],
+    };
+  },
+);
+
 /** In-process MCP server exposing the digest tools to the agent loop. */
 export const digestServer = createSdkMcpServer({
   name: "digest",
   version: "1.0.0",
-  tools: [synthesizeSpeech, sendTelegramVoice],
+  tools: [synthesizeSpeech, sendTelegramVoice, recordCoveredTool],
 });
 
 // Standalone test: `npm run test:tts` — synthesizes a fixed sentence and plays it.
