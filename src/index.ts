@@ -136,6 +136,9 @@ async function main(): Promise<void> {
       prompt,
       options: {
         cwd: PROJECT_ROOT,
+        // Pin the model — otherwise runs inherit the Claude Code CLI's
+        // default, which may be a pricier tier than this job needs.
+        model: "claude-sonnet-5",
         ...(existsSync(CLAUDE_EXECUTABLE) ? { pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE } : {}),
         mcpServers: { digest: digestServer },
         allowedTools: [
