@@ -1,18 +1,26 @@
 // Entry point: assembles the prompt, tools, and options, then drives the
 // Agent SDK loop while streaming its progress to the terminal.
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coveredSummary, loadCovered, todayKey } from "./memory.js";
+import { sendMessage } from "./telegram.js";
 import { digestServer } from "./tools.js";
 
 const PROJECT_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 // The SDK's bundled runtime is a Bun binary that requires AVX CPU
-// instructions this Mac doesn't have (it hangs at 100% CPU). Use the
-// system-installed Claude Code CLI instead.
-const CLAUDE_EXECUTABLE = join(homedir(), ".local/bin/claude");
+// instructions this Mac doesn't have (it hangs at 100% CPU). Prefer the
+// system-installed Claude Code CLI; CLAUDE_EXECUTABLE overrides the location,
+// and if neither exists the SDK falls back to its bundled runtime.
+const CLAUDE_EXECUTABLE = process.env.CLAUDE_EXECUTABLE ?? join(homedir(), ".local/bin/claude");
+
+// A crashed run can leave the lock behind; locks older than this are stale.
+const LOCK_FILE = join(PROJECT_ROOT, "memory", ".lock");
+const LOCK_STALE_MS = 30 * 60 * 1000;
+const AUDIO_KEEP_DAYS = 14;
 
 const today = new Date().toLocaleDateString("en-US", {
   weekday: "long",
@@ -72,64 +80,119 @@ ${covered}
 7. Finish with a one-paragraph summary of what you covered and delivered.
 `.trim();
 
-async function main(): Promise<void> {
-  const startedAt = Date.now();
+/** Prevent overlapping runs (which could double-send or clobber memory). */
+function acquireLock(): boolean {
+  mkdirSync(join(PROJECT_ROOT, "memory"), { recursive: true });
+  for (let i = 0; i < 2; i++) {
+    try {
+      writeFileSync(LOCK_FILE, String(process.pid), { flag: "wx" });
+      return true;
+    } catch {
+      const mtime = statSync(LOCK_FILE, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+      if (Date.now() - mtime < LOCK_STALE_MS) return false;
+      rmSync(LOCK_FILE, { force: true }); // stale — a previous run died
+    }
+  }
+  return false;
+}
 
-  const run = query({
-    prompt,
-    options: {
-      cwd: PROJECT_ROOT,
-      pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
-      mcpServers: { digest: digestServer },
-      allowedTools: [
-        "WebSearch",
-        "WebFetch",
-        "Read",
-        "Write",
-        "mcp__digest__synthesize_speech",
-        "mcp__digest__send_telegram_voice",
-        "mcp__digest__record_covered",
-      ],
-      maxTurns: 40,
-    },
-  });
+function releaseLock(): void {
+  rmSync(LOCK_FILE, { force: true });
+}
 
-  for await (const message of run) {
-    switch (message.type) {
-      case "system":
-        if (message.subtype === "init") {
-          console.log(`▶ session started · model: ${message.model}`);
-        }
-        break;
-
-      case "assistant":
-        for (const block of message.message.content) {
-          if (block.type === "text" && block.text.trim()) {
-            console.log(`\n💬 ${block.text.trim()}`);
-          } else if (block.type === "tool_use") {
-            console.log(`  ⚙ ${block.name}`);
-          }
-        }
-        break;
-
-      case "result": {
-        const seconds = ((Date.now() - startedAt) / 1000).toFixed(0);
-        if (message.subtype === "success") {
-          console.log(`\n✅ done in ${seconds}s · ${message.num_turns} turns · $${message.total_cost_usd.toFixed(4)}`);
-          if (!(todayKey() in loadCovered())) {
-            console.warn("⚠ memory has no entry for today — record_covered was never called.");
-          }
-        } else {
-          console.error(`\n❌ ${message.subtype} after ${seconds}s`);
-          process.exitCode = 1;
-        }
-        break;
-      }
+/** Keep out/ from growing forever; one digest MP3 lands there per day. */
+function pruneOldAudio(): void {
+  const outDir = join(PROJECT_ROOT, "out");
+  if (!existsSync(outDir)) return;
+  const cutoff = Date.now() - AUDIO_KEEP_DAYS * 24 * 60 * 60 * 1000;
+  for (const name of readdirSync(outDir)) {
+    if (name.endsWith(".mp3") && statSync(join(outDir, name)).mtimeMs < cutoff) {
+      unlinkSync(join(outDir, name));
     }
   }
 }
 
-main().catch((err) => {
+/** Best-effort Telegram notice so scheduled runs can't fail silently. */
+async function notify(text: string): Promise<void> {
+  try {
+    await sendMessage(text);
+  } catch {
+    console.error("(Could not deliver the notice to Telegram either.)");
+  }
+}
+
+async function main(): Promise<void> {
+  if (!acquireLock()) {
+    console.error("Another digest run appears to be in progress (memory/.lock) — exiting.");
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    pruneOldAudio();
+    const startedAt = Date.now();
+
+    const run = query({
+      prompt,
+      options: {
+        cwd: PROJECT_ROOT,
+        ...(existsSync(CLAUDE_EXECUTABLE) ? { pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE } : {}),
+        mcpServers: { digest: digestServer },
+        allowedTools: [
+          "WebSearch",
+          "WebFetch",
+          "Read",
+          "Write",
+          "mcp__digest__synthesize_speech",
+          "mcp__digest__send_telegram_voice",
+          "mcp__digest__record_covered",
+        ],
+        maxTurns: 40,
+      },
+    });
+
+    for await (const message of run) {
+      switch (message.type) {
+        case "system":
+          if (message.subtype === "init") {
+            console.log(`▶ session started · model: ${message.model}`);
+          }
+          break;
+
+        case "assistant":
+          for (const block of message.message.content) {
+            if (block.type === "text" && block.text.trim()) {
+              console.log(`\n💬 ${block.text.trim()}`);
+            } else if (block.type === "tool_use") {
+              console.log(`  ⚙ ${block.name}`);
+            }
+          }
+          break;
+
+        case "result": {
+          const seconds = ((Date.now() - startedAt) / 1000).toFixed(0);
+          if (message.subtype === "success") {
+            console.log(`\n✅ done in ${seconds}s · ${message.num_turns} turns · $${message.total_cost_usd.toFixed(4)}`);
+            if (!(todayKey() in loadCovered())) {
+              console.warn("⚠ memory has no entry for today — record_covered was never called.");
+              await notify("⚠️ AI digest: delivered, but dedup memory was not updated — tomorrow may repeat stories.");
+            }
+          } else {
+            console.error(`\n❌ ${message.subtype} after ${seconds}s`);
+            await notify(`⚠️ AI digest run failed (${message.subtype}) after ${seconds}s — no digest today.`);
+            process.exitCode = 1;
+          }
+          break;
+        }
+      }
+    }
+  } finally {
+    releaseLock();
+  }
+}
+
+main().catch(async (err) => {
   console.error(err);
+  await notify(`⚠️ AI digest run crashed: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 });
