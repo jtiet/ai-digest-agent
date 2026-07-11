@@ -6,6 +6,7 @@ import { EdgeTTS } from "edge-tts-universal";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { withRetry } from "./retry.js";
 import { sendAudio } from "./telegram.js";
 
 const OUT_DIR = fileURLToPath(new URL("../out", import.meta.url));
@@ -17,7 +18,9 @@ export async function synthesize(
   voice: string = DEFAULT_VOICE,
   fileName: string = `digest-${new Date().toISOString().slice(0, 10)}.mp3`,
 ): Promise<string> {
-  const { audio } = await new EdgeTTS(text, voice).synthesize();
+  // The Edge Read Aloud endpoint is unofficial and occasionally flaky —
+  // synthesis is idempotent, so retry transient failures.
+  const { audio } = await withRetry("TTS synthesis", () => new EdgeTTS(text, voice).synthesize());
   mkdirSync(OUT_DIR, { recursive: true });
   const filePath = join(OUT_DIR, fileName);
   writeFileSync(filePath, Buffer.from(await audio.arrayBuffer()));
