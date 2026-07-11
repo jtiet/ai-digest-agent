@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "digest": "tsx src/index.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
     "test:telegram": "tsx src/telegram.ts",
     "test:tts": "tsx src/tools.ts"
   },
