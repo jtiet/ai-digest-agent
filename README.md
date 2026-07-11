@@ -16,11 +16,13 @@ The interesting part is *how*: none of those steps are hard-coded as a pipeline.
 
 ```
 src/index.ts     entry point: prompt + query() agent loop, streams progress
-src/tools.ts     custom MCP tools: synthesize_speech, send_telegram_voice
+src/tools.ts     custom MCP tools: synthesize_speech, send_telegram_voice, record_covered
 src/telegram.ts  Telegram Bot API helpers (plain fetch, no SDK)
+src/memory.ts    rolling covered.json dedup memory (load/prune/write in code)
+src/retry.ts     retry helper for the TTS and Telegram network edges
 src/smoke.ts     minimal SDK round-trip (auth/runtime diagnostic)
 memory/          rolling covered.json for story dedup (gitignored)
-out/             generated scripts and audio (gitignored)
+out/             generated scripts and audio (gitignored, pruned after 14 days)
 ```
 
 The custom tools are defined with `createSdkMcpServer()` + `tool()` from the
@@ -60,6 +62,13 @@ npm run test:telegram   # sends a hello text to your chat
 npm run test:tts        # synthesizes a test sentence and plays it
 ```
 
+Run the unit tests (memory pruning/validation, retry policy, Telegram
+delivery rules — no network, no real sends):
+
+```bash
+npm test
+```
+
 ## Running
 
 ```bash
@@ -83,22 +92,30 @@ agent's own narration (💬) — ending with a summary like:
 Run it on demand, or schedule it (cron / launchd) if you want a daily edition —
 each run costs roughly $0.30–0.75 of usage depending on the news day.
 
+Runs are hardened for unattended use: TTS and Telegram calls retry transient
+failures (sends at most twice — duplicates are worse than a missed day), a
+lock file prevents overlapping runs, and if a run fails or the memory update
+is skipped, a ⚠️ notice is sent to the same Telegram chat so failures are
+never silent.
+
 ## Configuration
 
 - **Voice**: default is `en-US-AndrewNeural`; change `DEFAULT_VOICE` in
   `src/tools.ts` (any Edge neural voice name works).
 - **Length / tone / categories**: all live in the prompt in `src/index.ts` —
   the prompt is the program.
-- **Memory window**: the dedup horizon (3 days) is also prompt-defined.
+- **Memory window**: the dedup horizon (3 days) is `HORIZON_DAYS` in
+  `src/memory.ts`. The agent reads its memory from the prompt and records new
+  headlines via the `record_covered` tool; the file itself is managed in code.
 
 ## Troubleshooting
 
 - **Agent hangs at startup, 100% CPU:** the SDK's bundled runtime is a Bun
   binary that requires AVX CPU instructions. On CPUs without AVX, point the SDK
-  at your installed Claude Code CLI instead — this project already does, via
-  `pathToClaudeCodeExecutable` in `src/index.ts` (adjust the path if your CLI
-  lives elsewhere). `npx tsx src/smoke.ts` is the quick way to test the
-  runtime and auth in isolation.
+  at your installed Claude Code CLI instead — this project already does, and
+  the `CLAUDE_EXECUTABLE` env var overrides the default `~/.local/bin/claude`
+  location (if neither exists, the SDK's bundled runtime is used). `npx tsx
+  src/smoke.ts` is the quick way to test the runtime and auth in isolation.
 - **`Telegram sendMessage failed`:** check the `.env` values, and make sure
   you've sent your bot at least one message (bots can't initiate chats).
 - **TTS fails:** edge-tts wraps an unofficial Microsoft endpoint that
